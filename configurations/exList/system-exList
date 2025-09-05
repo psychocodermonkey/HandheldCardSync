@@ -1,0 +1,11 @@
+# Example of what you might have in your exlist
+
+- The pattern "*-exlist" will keep the exclusion list from getting trampled if you happen to sync from a location tha that has one.
+- Also useful to include is temporary files or other junk that might be in your source directory.
+- You may delete the dashed line and this comment to make this file cleaner.
+
+------------------------------------------------------------------------------------------------------------------
+._*
+.DS_Store
+*-exlist
+Game Boy Player Start-Up Disc (USA) (Rev 3).iso
