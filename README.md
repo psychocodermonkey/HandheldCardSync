@@ -20,7 +20,7 @@ This repository contains scripts designed to facilitate syncing directories betw
 
 To use the scripts provided in this repository, follow these steps:
 
-1. Ensure that the source paths are configured properly in cardSync.conf in the same location as the cardSync script.
+1. Ensure that the source paths are configured properly in `cardSync.conf` in the same location as the cardSync script.
 2. Run the script from the root of the SD card or specify system directories manually if configured.
 3. Choose between running in test mode (`-t`) to preview changes without making any alterations, or live mode (`-l`) to execute the sync operations.
 
@@ -31,7 +31,7 @@ To use the scripts provided in this repository, follow these steps:
 
 ## Configuration
 
-Configuration settings are managed through a file named `cardSync.conf`. Ensure this file is correctly formatted according to the documentation provided in the script or within the `cardSYnc.conf` file itself. Refer to the comments within the configuration for more detailed information.
+Configuration settings are managed through a file named `cardSync.conf`. Ensure this file is correctly formatted according to the documentation provided in the script or within the `cardSync.conf` file itself. Refer to the comments within the configuration for more detailed information.
 
 ### Example Configuration File (`cardSync.conf`)
 
