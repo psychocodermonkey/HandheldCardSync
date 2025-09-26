@@ -26,6 +26,8 @@ DRY_RUN=false
 LIVE_RUN=false
 DUMP_CONFIG=false
 CONFIG_FILE="cardSync.conf"
+SYNC_STAGES=0
+FOOTER_SIZE=2
 
 # Verify that rsync is installed before doing anything.
 command -v rsync > /dev/null 2>&1 || {
@@ -94,6 +96,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # Section header [section]
     if [[ "$line" =~ ^\[(.*)\]$ ]]; then
         current_section="${BASH_REMATCH[1]}"
+        # Only track non-consoles sections
+        [[ "$current_section" != "consoles" ]] && ((SYNC_STAGES++))
         [[ "$current_section" != "consoles" ]] && sections+=("$current_section")
         continue
     fi
@@ -117,6 +121,85 @@ while read -r key value; do
     [[ -z "$key" || "$key" == \#* ]] && continue
     consoles["$key"]="$value"
 done < <(awk '/\[consoles\]/ {found=1; next} /^\[/ {found=0} found' "$CONFIG_FILE")
+ ---------------------------------------------------------
+# Update the window variables
+# ---------------------------------------------------------
+update_dimensions() {
+  # Update lines and column variables.
+  LINES=$(tput lines)
+  COLUMNS=$(tput cols)
+}
+
+update_dimensions
+
+# ---------------------------------------------------------
+# Function to initilize terminal for display.
+# ---------------------------------------------------------
+init-term() {
+  # Make room for footer no matter where we are at on the screen.
+  local i
+  for i in {1..$FOOTER_SIZE}; do
+    printf "\n"
+  done
+
+  printf "\e7"                                         # Save curser location.
+  printf "\e[%d;%dr" 0 "$((LINES - FOOTER_SIZE))"      # Set scrollable region.
+  printf "\e8"                                         # Restore cursor location.
+  printf "\e[%dA" "$((FOOTER_SIZE))"                   # Move cursor up the same number of new-lines we made room for.
+  printf "\e[?25l"                                     # Hide the cursor
+}
+
+# ---------------------------------------------------------
+# Put the terminal back the way we found it.
+# ---------------------------------------------------------
+deinit-term() {
+  local i
+  printf "\e7"                                        # Save cursor location.
+  printf "\e[%d;%dr" 0 "$((LINES))"                   # Reset scrollable region to full screen.
+  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE))" 0     # Move cursor to top of footer
+  for i in {1..$FOOTER_SIZE}; do                      # Clear all lines in footer.
+    printf "\e[0K"
+  done
+  printf "\e8"                                        # Put cursor back where we found it.
+  printf "\e[?25h"                                    # Show cursor again.
+}
+
+# ---------------------------------------------------------
+# Build and print a simple text progress bar at the bottom.
+# ---------------------------------------------------------
+progress_bar() {
+  local source_sys=$1
+  local dest_sys=$2
+  local current=$3
+
+  # Calculate progress
+  local len=$((SYNC_STAGES * ${#consoles[@]}))
+  local perc_done=$((current * 100 / len))
+  local bar_len=$((COLUMNS - 7))                          # Use terminal columns to set the length of the progress bar less room for [] ###%.
+  local num_bars=$((perc_done * bar_len / 100))           # Determine how long the bar needs to be.
+
+  printf "\e7"                                            # Move cursor to home position.
+  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 1))" 0         # Move cursor to the correct position for the "Syncing:" line
+  printf "\e[0K"                                          # Clear the line from the current position to the end of the line.
+  printf "[+] Syncing: %s --> %s" "$source_sys" "$dest_sys"
+  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 2))" 0     # Move cursor to the correct position for the progress bar
+  local bar="["
+  for ((i = 0; i < num_bars; i++)); do
+    bar+="█"
+  done
+  for ((i = num_bars; i < bar_len; i++)); do
+    bar+="."
+  done
+  bar+="] $perc_done%"
+
+  printf "%s" "$bar"                                   # Print the progress section.
+  printf "\e8"                                         # Put cursor back where we found it.
+}
+
+# Start messing with terminal
+trap deinit-term EXIT
+trap "update_dimensions; init-term" WINCH
+init-term
 
 # ---------------------------------------------------------
 # Function to center text within a dashed line
@@ -195,71 +278,73 @@ rsync_command() {
     fi
     cmd+=" $src $dest"
 
-    echo ""
-    center_text "$section"
-    echo "| [+] Syncing: $src -> $dest"
-    echo "| [+] $cmd"
-    echo "----------------------------------------------------------------------------------------------------"
-
     eval $cmd  # Execute the constructed rsync command
 }
 
-[[ "$DUMP_CONFIG" = true ]] && dump_config
+main() {
+  [[ "$DUMP_CONFIG" = true ]] && dump_config
 
-# Read each line in the mapping file
-for src_system in "${!consoles[@]}"; do
+  local current=0
 
-  # Extract source and destination from the line
-  dest_system="${consoles[$src_system]}"
+  # Read each line in the mapping file
+  for src_system in "${!consoles[@]}"; do
 
-  echo ""
-  echo ""
-  center_text " Starting new system "
-  echo "| [+] Source.......: $src_system"
-  echo "|           -- to --"
-  echo "| [+] Destination..: $dest_system"
-  echo "----------------------------------------------------------------------------------------------------"
+    # Extract source and destination from the line
+    dest_system="${consoles[$src_system]}"
 
-  # -- Section: ROMS
-  section_description=" Syncing Roms "
-  src_path="$(echo "$roms_source" | sed "s/?/$src_system/g")"
-  dest_path="$(echo "$roms_dest" | sed "s/?/$dest_system/g")"
-  if [[ -n $roms_exlist ]]; then
-    exclude="${roms_exlist//\?/${consoles[$src_system]}}"
-    rsync_command "$section_description" "$src_path" "$dest_path" "$exclude"
-  else
-    rsync_command "$section_description" "$src_path" "$dest_path"
-  fi
-
-  # -- Section: MEDIA
-  if [[ $media_sync == "true" ]]; then
-    section_description=" Syncing Media "
-    src_path="$(echo "$media_source" | sed "s/?/$src_system/g")"
-    dest_path="$(echo "$media_dest" | sed "s/?/$dest_system/g")"
-    rsync_command "$section_description" "$src_path" "$dest_path"
-  fi
-
-  # -- Section: SAVES
-  if [[ $saves_sync == "true" ]]; then
-    section_description=" Syncing Saves "
-    src_path="$(echo "$saves_source" | sed "s/?/$src_system/g")"
-    dest_path="$(echo "$saves_dest" | sed "s/?/$dest_system/g")"
-    rsync_command "$section_description" "$src_path" "$dest_path"
-  fi
-
-  # -- Section: SAVE STATES
-  if [[ $states_sync == "true" ]]; then
-    section_description=" Syncing Save States "
-    src_path="$(echo "$states_source" | sed "s/?/$src_system/g")"
-    dest_path="$(echo "$states_dest" | sed "s/?/$dest_system/g")"
-    rsync_command "$section_description" "$src_path" "$dest_path"
-  fi
-
-  # -- Section: GAMELISTS
-  if [[ $gamelists_sync == "true" ]]; then
-    section_description=" Syncing Gamelists "
-    src_path="$(echo "$gamelists_source" | sed "s/?/$src_system/g")"
+    # -- Section: ROMS
+    section_description=" Syncing Roms "
+    ((current++))
+    src_path="$(echo "$roms_source" | sed "s/?/$src_system/g")"
     dest_path="$(echo "$roms_dest" | sed "s/?/$dest_system/g")"
-    rsync_command "$section_description" "$src_path" "$dest_path"
-  fi
-done
+    progress_bar "$src_system" "$dest_system" "$current"
+    if [[ -n $roms_exlist ]]; then
+      exclude="${roms_exlist//\?/${consoles[$src_system]}}"
+      rsync_command "$section_description" "$src_path" "$dest_path" "$exclude"
+    else
+      rsync_command "$section_description" "$src_path" "$dest_path"
+    fi
+
+    # -- Section: MEDIA
+    if [[ $media_sync == "true" ]]; then
+      section_description=" Syncing Media "
+      ((current++))
+      src_path="$(echo "$media_source" | sed "s/?/$src_system/g")"
+      dest_path="$(echo "$media_dest" | sed "s/?/$dest_system/g")"
+      progress_bar "$src_system" "$dest_system" "$current"
+      rsync_command "$section_description" "$src_path" "$dest_path"
+    fi
+
+    # -- Section: SAVES
+    if [[ $saves_sync == "true" ]]; then
+      section_description=" Syncing Saves "
+      ((current++))
+      src_path="$(echo "$saves_source" | sed "s/?/$src_system/g")"
+      dest_path="$(echo "$saves_dest" | sed "s/?/$dest_system/g")"
+      progress_bar "$src_system" "$dest_system" "$current"
+      rsync_command "$section_description" "$src_path" "$dest_path"
+    fi
+
+    # -- Section: SAVE STATES
+    if [[ $states_sync == "true" ]]; then
+      section_description=" Syncing Save States "
+      ((current++))
+      src_path="$(echo "$states_source" | sed "s/?/$src_system/g")"
+      dest_path="$(echo "$states_dest" | sed "s/?/$dest_system/g")"
+      progress_bar "$src_system" "$dest_system" "$current"
+      rsync_command "$section_description" "$src_path" "$dest_path"
+    fi
+
+    # -- Section: GAMELISTS
+    if [[ $gamelists_sync == "true" ]]; then
+      section_description=" Syncing Gamelists "
+      ((current++))
+      src_path="$(echo "$gamelists_source" | sed "s/?/$src_system/g")"
+      dest_path="$(echo "$roms_dest" | sed "s/?/$dest_system/g")"
+      progress_bar "$src_system" "$dest_system" "$current"
+      rsync_command "$section_description" "$src_path" "$dest_path"
+    fi
+  done
+}
+
+main
