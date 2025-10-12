@@ -182,14 +182,14 @@ progress_bar() {
   # Calculate progress
   local len=$((SYNC_STAGES * ${#consoles[@]}))
   local perc_done=$((current * 100 / len))
-  local bar_len=$((COLUMNS - 7))                          # Use terminal columns to set the length of the progress bar less room for [] ###%.
-  local num_bars=$((perc_done * bar_len / 100))           # Determine how long the bar needs to be.
+  local bar_len=$((COLUMNS - 7))                             # Use terminal columns to set the length of the progress bar less room for [] ###%.
+  local num_bars=$((perc_done * bar_len / 100))              # Determine how long the bar needs to be.
 
-  printf "\e7"                                            # Move cursor to home position.
-  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 1))" 0         # Move cursor to the correct position for the "Syncing:" line
-  printf "\e[0K"                                          # Clear the line from the current position to the end of the line.
-  printf "[+] Syncing: %s --> %s" "$source_sys" "$dest_sys"
-  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 2))" 0     # Move cursor to the correct position for the progress bar
+  printf "\e7"                                               # Move cursor to home position.
+  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 1))" 0        # Move cursor to the correct position for the "Syncing:" line
+  printf "\e[0K"                                             # Clear the line from the current position to the end of the line.
+  printf "\e[0;35m[+]\e[00m Syncing: %s --> %s" "$source_sys" "$dest_sys"
+  printf "\e[%d;%dH" "$((LINES - FOOTER_SIZE + 2))" 0        # Move cursor to the correct position for the progress bar
   local bar="["
   for ((i = 0; i < num_bars; i++)); do
     bar+="█"
@@ -199,7 +199,7 @@ progress_bar() {
   done
   bar+="] $perc_done%"
 
-  printf "%s" "$bar"                                   # Print the progress section.
+  printf "\e[38;5;208m%s\e[00," "$bar"                 # Print the progress section.
   printf "\e8"                                         # Put cursor back where we found it.
 }
 
