@@ -1,0 +1,201 @@
+param (
+    [switch]$t, # Test/Dry run
+    [switch]$l, # Live run
+    [switch]$d  # Dump config
+)
+
+# ------------------------------
+# Global Vars
+# ------------------------------
+$DRY_RUN = $false
+$LIVE_RUN = $false
+$DUMP_CONFIG = $false
+$CONFIG_FILE = "cardSync.conf"
+$SYNC_STAGES = 0
+$FOOTER_SIZE = 2
+$sections = @()
+$consoles = @{}
+$current = 0
+
+# ------------------------------
+# Mode Selection
+# ------------------------------
+if ($t) { $DRY_RUN = $true }
+elseif ($l) { $LIVE_RUN = $true }
+elseif ($d) { $DUMP_CONFIG = $true }
+else {
+    Write-Host "`n[+] !! ERROR :: No mode specified. Use -t for test, -l for live, -d to dump config."
+    exit 1
+}
+
+# ------------------------------
+# Parse Config File
+# ------------------------------
+if (-Not (Test-Path $CONFIG_FILE)) {
+    Write-Host " [+] Error: The mapping file '$CONFIG_FILE' does not exist."
+    exit 1
+}
+
+Write-Host " [+] Fetching parameters..."
+
+$currentSection = ""
+$varsBySection = @{}
+
+Get-Content $CONFIG_FILE | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -eq "" -or $line.StartsWith("#")) { return }
+
+    if ($line -match "^\[(.+)\]$") {
+        $currentSection = $Matches[1]
+        if ($currentSection -ne "consoles") {
+            $sections += $currentSection
+            $SYNC_STAGES++
+        }
+        return
+    }
+
+    if ($currentSection -eq "consoles") { return }
+
+    if ($line -match "^([^=]+)=(.*)$") {
+        $key = $Matches[1].Trim()
+        $value = $Matches[2].Trim()
+
+        if ($key -eq "sync" -and $value -eq "false") {
+            $SYNC_STAGES--
+        }
+
+        $varName = "${currentSection}_$key"
+        Set-Variable -Name $varName -Value $value -Scope Script
+        if (-Not $varsBySection.ContainsKey($currentSection)) {
+            $varsBySection[$currentSection] = @()
+        }
+        $varsBySection[$currentSection] += $varName
+    }
+}
+
+# Parse [consoles]
+$inConsoles = $false
+Get-Content $CONFIG_FILE | ForEach-Object {
+    if ($_ -match "^\[consoles\]") { $inConsoles = $true; return }
+    if ($_ -match "^\[.+\]") { $inConsoles = $false }
+    if ($inConsoles -and $_ -match "^([^=]+)=(.*)$") {
+        $key = $Matches[1].Trim()
+        $val = $Matches[2].Trim()
+        if ($key) { $consoles[$key] = $val }
+    }
+}
+
+# ------------------------------
+# Terminal Helpers
+# ------------------------------
+function Update-Dimensions {
+    $script:Lines = $Host.UI.RawUI.WindowSize.Height
+    $script:Columns = $Host.UI.RawUI.WindowSize.Width
+}
+
+function Init-Term {
+    Update-Dimensions
+    for ($i=0; $i -lt $FOOTER_SIZE; $i++) { Write-Host "" }
+    Write-Host "`e7" -NoNewline       # Save cursor pos
+    Write-Host "`e[?25l" -NoNewline   # Hide cursor
+}
+
+function Deinit-Term {
+    Write-Host "`e7" -NoNewline
+    Write-Host "`e[?25h" -NoNewline   # Show cursor
+}
+
+function Show-ProgressBar($source, $dest, $currentStep) {
+    $totalSteps = $SYNC_STAGES * $consoles.Count
+    if ($totalSteps -eq 0) { return }
+
+    $percent = [math]::Floor(($currentStep / $totalSteps) * 100)
+    $barLen = $Columns - 7
+    if ($barLen -lt 10) { $barLen = 10 }
+
+    $numBars = [math]::Floor($percent * $barLen / 100)
+    $filled = "█" * $numBars
+    $empty = "." * ($barLen - $numBars)
+    $bar = "[$filled$empty] $percent%"
+
+    # Move to footer and overwrite
+    $line1 = $Lines - $FOOTER_SIZE + 1
+    $line2 = $Lines - $FOOTER_SIZE + 2
+
+    Write-Host "`e7" -NoNewline
+    Write-Host ("`e[{0};1H`e[0K[+] Syncing: {1} --> {2}" -f $line1, $source, $dest) -NoNewline
+    Write-Host ("`e[{0};1H`e[0K{1}" -f $line2, $bar) -NoNewline
+    Write-Host "`e8" -NoNewline
+}
+
+# ------------------------------
+# Copy Function (Robocopy)
+# ------------------------------
+function Sync-Path($section, $src, $dest, $excludeFile=$null) {
+    if (-not (Test-Path $src)) {
+        Write-Host "[+] WARNING :: Source path $src not found."
+        return
+    }
+
+    $roboArgs = @("$src", "$dest", "/E", "/NFL", "/NDL", "/NP")
+    if ($DRY_RUN) { $roboArgs += "/L" }
+    if ($excludeFile -and (Test-Path $excludeFile)) { $roboArgs += ("/XF `"$excludeFile`"") }
+
+    Write-Host "[+] $section :: $src -> $dest"
+    robocopy @roboArgs | Out-Null
+}
+
+# ------------------------------
+# Main
+# ------------------------------
+trap { Deinit-Term; exit } SIGINT SIGTERM
+Init-Term
+
+foreach ($srcSystem in $consoles.Keys) {
+    $destSystem = $consoles[$srcSystem]
+
+    # ROMS
+    $current++
+    $srcPath = $roms_source -replace "\?", $srcSystem
+    $destPath = $roms_dest -replace "\?", $destSystem
+    Show-ProgressBar $srcSystem $destSystem $current
+    Sync-Path "ROMs" $srcPath $destPath $roms_exlist
+
+    # MEDIA
+    if ($media_sync -eq "true") {
+        $current++
+        $srcPath = $media_source -replace "\?", $srcSystem
+        $destPath = $media_dest -replace "\?", $destSystem
+        Show-ProgressBar $srcSystem $destSystem $current
+        Sync-Path "Media" $srcPath $destPath
+    }
+
+    # SAVES
+    if ($saves_sync -eq "true") {
+        $current++
+        $srcPath = $saves_source -replace "\?", $srcSystem
+        $destPath = $saves_dest -replace "\?", $destSystem
+        Show-ProgressBar $srcSystem $destSystem $current
+        Sync-Path "Saves" $srcPath $destPath
+    }
+
+    # STATES
+    if ($states_sync -eq "true") {
+        $current++
+        $srcPath = $states_source -replace "\?", $srcSystem
+        $destPath = $states_dest -replace "\?", $destSystem
+        Show-ProgressBar $srcSystem $destSystem $current
+        Sync-Path "States" $srcPath $destPath
+    }
+
+    # GAMELISTS
+    if ($gamelists_sync -eq "true") {
+        $current++
+        $srcPath = $gamelists_source -replace "\?", $srcSystem
+        $destPath = $roms_dest -replace "\?", $destSystem
+        Show-ProgressBar $srcSystem $destSystem $current
+        Sync-Path "Gamelists" $srcPath $destPath
+    }
+}
+
+Deinit-Term
