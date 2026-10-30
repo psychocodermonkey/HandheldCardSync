@@ -84,6 +84,8 @@ echo " [+] Fetching parameters..."
 # Track sections and their variables
 sections=()
 declare -A vars_by_section
+direct_sources=()
+direct_destinations=()
 current_section=""
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -96,21 +98,32 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # Section header [section]
     if [[ "$line" =~ ^\[(.*)\]$ ]]; then
         current_section="${BASH_REMATCH[1]}"
-        # Only track non-consoles sections
-        [[ "$current_section" != "consoles" ]] && ((SYNC_STAGES++))
-        [[ "$current_section" != "consoles" ]] && sections+=("$current_section")
+        # Only track console-based sections
+        [[ "$current_section" != "consoles" && "$current_section" != "direct" ]] && sections+=("$current_section")
         continue
     fi
 
     # Skip [consoles] section here
     [[ "$current_section" == "consoles" ]] && continue
 
+    if [[ "$current_section" == "direct" ]]; then
+        if [[ "$line" =~ ^(sync|exlist)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            printf -v "direct_${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+([^[:space:]]+)$ ]]; then
+            direct_sources+=("${BASH_REMATCH[1]}")
+            direct_destinations+=("${BASH_REMATCH[2]}")
+        else
+            echo " [+] !! WARNING :: Invalid direct mapping: $line"
+        fi
+        continue
+    fi
+
     # Key=value pairs
     if [[ "$line" =~ ^([^=[:space:]]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
         key="${BASH_REMATCH[1]}"
         value="${BASH_REMATCH[2]}"
         varname="${current_section}_${key}"
-        eval "$varname=\"$value\""
+        printf -v "$varname" '%s' "$value"
         vars_by_section[$current_section]="${vars_by_section[$current_section]} $varname"
     fi
 done < "$CONFIG_FILE"
@@ -121,7 +134,16 @@ while read -r key value; do
     [[ -z "$key" || "$key" == \#* ]] && continue
     consoles["$key"]="$value"
 done < <(awk '/\[consoles\]/ {found=1; next} /^\[/ {found=0} found' "$CONFIG_FILE")
- ---------------------------------------------------------
+
+SYNC_STAGES=1 # ROMs are always synchronized for each console.
+[[ "$media_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$saves_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$states_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$gamelists_sync" == "true" ]] && ((SYNC_STAGES++))
+TOTAL_SYNCS=$((SYNC_STAGES * ${#consoles[@]}))
+[[ "$direct_sync" == "true" ]] && ((TOTAL_SYNCS += ${#direct_sources[@]}))
+
+# ---------------------------------------------------------
 # Update the window variables
 # ---------------------------------------------------------
 update_dimensions() {
@@ -171,10 +193,11 @@ progress_bar() {
   local source_sys=$1
   local dest_sys=$2
   local current=$3
+  local i
 
   # Calculate progress
-  local len=$((SYNC_STAGES * ${#consoles[@]}))
-  local perc_done=$((current * 100 / len))
+  local perc_done=0
+  (( TOTAL_SYNCS > 0 )) && perc_done=$((current * 100 / TOTAL_SYNCS))
   local bar_len=$((COLUMNS - 7))                             # Use terminal columns to set the length of the progress bar less room for [] ###%.
   local num_bars=$((perc_done * bar_len / 100))              # Determine how long the bar needs to be.
 
@@ -192,7 +215,7 @@ progress_bar() {
   done
   bar+="] $perc_done%"
 
-  printf "\e[38;5;208m%s\e[00," "$bar"                 # Print the progress section.
+  printf "\e[38;5;208m%s\e[00m," "$bar"                 # Print the progress section.
   printf "\e8"                                         # Put cursor back where we found it.
 }
 
@@ -227,11 +250,19 @@ dump_config() {
   for section in "${sections[@]}"; do
     echo "[$section]"
     for v in ${vars_by_section[$section]}; do
-      val="$(eval echo "\$$v")"
+      val="${!v}"
       printf "  %-10s : %s\n" "${v#${section}_}" "$val"
     done
     echo ""
   done
+
+  echo "[direct]"
+  printf "  %-10s : %s\n" "sync" "${direct_sync:-false}"
+  [[ -n "$direct_exlist" ]] && printf "  %-10s : %s\n" "exlist" "$direct_exlist"
+  for ((i = 0; i < ${#direct_sources[@]}; i++)); do
+    printf "  %s -> %s\n" "${direct_sources[i]}" "${direct_destinations[i]}"
+  done
+  echo ""
 
   # Special case: consoles array
   echo "[consoles]"
@@ -254,7 +285,7 @@ rsync_command() {
     local dest="$3"
     local exlist="$4"
 
-        # Check if source and destination paths are provided
+    # Check if source and destination paths are provided
     if [[ -z "$section" || -z "$src" || -z "$dest" ]]; then
         echo "Usage: rsync_command <section> <source> <destination>"
         return 1
@@ -265,8 +296,21 @@ rsync_command() {
     dest="$(echo "$dest" | sed -E 's:/+:/:g; s:(^//):/:')"
 
     # Ensure trailing slash if it's a directory path
-    [[ "$src"  != */ ]] && src="$src/"
+    [[ "$src" != */ ]] && src="$src/"
     [[ "$dest" != */ ]] && dest="$dest/"
+
+    # In live mode, ensure destination exists before syncing.
+    if [[ "$LIVE_RUN" = true ]]; then
+      if [[ -z "$dest" || "$dest" == "/" ]]; then
+        echo " [+] !! ERROR :: Invalid destination path: '$dest'"
+        return 1
+      fi
+
+      if ! mkdir -p "$dest"; then
+        echo " [+] !! ERROR :: Failed to create destination directory: $dest"
+        return 1
+      fi
+    fi
 
     # Build the rsync command based on the mode
     # local cmd="$RSYNC_PREFIX --exclude='._*' --exclude='.DS_Store'"
@@ -277,6 +321,15 @@ rsync_command() {
       fi
     fi
     cmd+=" $src $dest"
+
+    if [[ "$section" == "direct" ]]; then
+      local -a direct_cmd
+      read -r -a direct_cmd <<< "$RSYNC_PREFIX"
+      [[ -n "$exlist" && -f "$exlist" ]] && direct_cmd+=("--exclude-from=$exlist")
+      direct_cmd+=("$src" "$dest")
+      "${direct_cmd[@]}"
+      return $?
+    fi
 
     eval $cmd  # Execute the constructed rsync command
 }
@@ -340,11 +393,25 @@ main() {
       section_description=" Syncing Gamelists "
       ((current++))
       src_path="$(echo "$gamelists_source" | sed "s/?/$src_system/g")"
-      dest_path="$(echo "$roms_dest" | sed "s/?/$dest_system/g")"
+      dest_path="$(echo "$gamelists_dest" | sed "s/?/$dest_system/g")"
       progress_bar "$src_system" "$dest_system" "$current"
       rsync_command "$section_description" "$src_path" "$dest_path"
     fi
   done
+
+  if [[ "$direct_sync" == "true" ]]; then
+    for ((i = 0; i < ${#direct_sources[@]}; i++)); do
+      src_path="${direct_sources[i]}"
+      dest_path="${direct_destinations[i]}"
+      ((current++))
+      progress_bar "$src_path" "$dest_path" "$current"
+      if [[ ! -d "$src_path" ]]; then
+        echo " [+] !! WARNING :: Direct source directory does not exist: $src_path"
+        continue
+      fi
+      rsync_command "direct" "$src_path" "$dest_path" "$direct_exlist"
+    done
+  fi
 }
 
 main
