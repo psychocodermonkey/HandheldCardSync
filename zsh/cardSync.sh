@@ -199,7 +199,7 @@ progress_bar() {
   done
   bar+="] $perc_done%"
 
-  printf "\e[38;5;208m%s\e[00," "$bar"                 # Print the progress section.
+  printf "\e[38;5;208m%s\e[00m," "$bar"                 # Print the progress section.
   printf "\e8"                                         # Put cursor back where we found it.
 }
 
@@ -277,6 +277,19 @@ rsync_command() {
     [[ "$src" != */ ]] && src="$src/"
     [[ "$dest" != */ ]] && dest="$dest/"
 
+    # In live mode, ensure destination exists before syncing.
+    if [[ "$LIVE_RUN" = true ]]; then
+      if [[ -z "$dest" || "$dest" == "/" ]]; then
+        echo " [+] !! ERROR :: Invalid destination path: '$dest'"
+        return 1
+      fi
+
+      if ! mkdir -p "$dest"; then
+        echo " [+] !! ERROR :: Failed to create destination directory: $dest"
+        return 1
+      fi
+    fi
+
     # Build the rsync command based on the mode
     # local cmd="$RSYNC_PREFIX --exclude='._*' --exclude='.DS_Store'"
     local cmd="$RSYNC_PREFIX"
@@ -350,7 +363,7 @@ main() {
       section_description=" Syncing Gamelists "
       ((current++))
       src_path="${gamelists_source//\?/${(Q)src_system}}"
-      dest_path="${roms_dest//\?/${consoles[$src_system]}}"
+      dest_path="${gamelists_dest//\?/${consoles[$src_system]}}"
       progress_bar "$src_system" "$dest_system" "$current"
       rsync_command "$section_description" "$src_path" "$dest_path"
     fi
