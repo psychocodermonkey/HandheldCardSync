@@ -84,6 +84,7 @@ echo " [+] Fetching parameters..."
 # Track sections and their variables
 typeset -a sections
 typeset -A vars_by_section
+typeset -a direct_sources direct_destinations
 current_section=""
 while IFS= read -r line || [[ -n "$line" ]]; do
     # Trim leading/trailing whitespace
@@ -95,22 +96,30 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # Section header [section]
     if [[ "$line" =~ '^\[(.*)\]$' ]]; then
         current_section="${match[1]}"
-        # Only track non-consoles sections
-        [[ "$current_section" != "consoles" ]] && ((SYNC_STAGES++))
-        [[ "$current_section" != "consoles" ]] && sections+="$current_section"
+        # Only track console-based sections
+        [[ "$current_section" != "consoles" && "$current_section" != "direct" ]] && sections+="$current_section"
         continue
     fi
 
     # Skip [consoles] section here
     [[ "$current_section" == "consoles" ]] && continue
 
+    if [[ "$current_section" == "direct" ]]; then
+        if [[ "$line" =~ '^(sync|exlist)[[:space:]]*=[[:space:]]*(.*)$' ]]; then
+            typeset -g "direct_${match[1]}=${match[2]}"
+        elif [[ "$line" =~ '^([^[:space:]]+)[[:space:]]+([^[:space:]]+)$' ]]; then
+            direct_sources+=("${match[1]}")
+            direct_destinations+=("${match[2]}")
+        else
+            echo " [+] !! WARNING :: Invalid direct mapping: $line"
+        fi
+        continue
+    fi
+
     # Key=value pairs
     if [[ "$line" =~ '^([^=[:space:]]+)[[:space:]]*=[[:space:]]*(.*)$' ]]; then
         key="${match[1]}"
         value="${match[2]}"
-
-        # If not syncing the section, remove it from counted stages.
-        [[ "$key" == "sync" && "$value" == "false" ]] && ((SYNC_STAGES--))
 
         # Build variable name section_key
         varname="${current_section}_${key}"
@@ -127,6 +136,14 @@ while read -r key value; do
     [[ -z "$key" || "$key" == \#* ]] && continue
     consoles["$key"]="$value"
 done < <(awk '/\[consoles\]/ {found=1; next} /^\[/ {found=0} found' "$CONFIG_FILE")
+
+SYNC_STAGES=1 # ROMs are always synchronized for each console.
+[[ "$media_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$saves_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$states_sync" == "true" ]] && ((SYNC_STAGES++))
+[[ "$gamelists_sync" == "true" ]] && ((SYNC_STAGES++))
+TOTAL_SYNCS=$((SYNC_STAGES * ${#consoles[@]}))
+[[ "$direct_sync" == "true" ]] && ((TOTAL_SYNCS += ${#direct_sources[@]}))
 
 # ---------------------------------------------------------
 # Update the window variables
@@ -178,10 +195,11 @@ progress_bar() {
   local source_sys=$1
   local dest_sys=$2
   local current=$3
+  local i
 
   # Calculate progress
-  local len=$((SYNC_STAGES * ${#consoles[@]}))
-  local perc_done=$((current * 100 / len))
+  local perc_done=0
+  (( TOTAL_SYNCS > 0 )) && perc_done=$((current * 100 / TOTAL_SYNCS))
   local bar_len=$((COLUMNS - 7))                             # Use terminal columns to set the length of the progress bar less room for [] ###%.
   local num_bars=$((perc_done * bar_len / 100))              # Determine how long the bar needs to be.
 
@@ -242,6 +260,14 @@ dump_config() {
     echo ""
   done
 
+  echo "[direct]"
+  printf "  %-10s : %s\n" "sync" "${direct_sync:-false}"
+  [[ -n "$direct_exlist" ]] && printf "  %-10s : %s\n" "exlist" "$direct_exlist"
+  for ((i = 1; i <= ${#direct_sources[@]}; i++)); do
+    printf "  %s -> %s\n" "${direct_sources[i]}" "${direct_destinations[i]}"
+  done
+  echo ""
+
   # Special case: consoles array
   echo "[consoles]"
   for key in ${(k)consoles}; do
@@ -300,6 +326,15 @@ rsync_command() {
       fi
     fi
     cmd+=" $src $dest"
+
+    if [[ "$section" == "direct" ]]; then
+      local -a direct_cmd
+      direct_cmd=(${=RSYNC_PREFIX})
+      [[ -n "$exlist" && -f "$exlist" ]] && direct_cmd+=("--exclude-from=$exlist")
+      direct_cmd+=("$src" "$dest")
+      "${direct_cmd[@]}"
+      return $?
+    fi
 
     eval $cmd  # Execute the constructed rsync command
 }
@@ -368,6 +403,20 @@ main() {
       rsync_command "$section_description" "$src_path" "$dest_path"
     fi
   done
+
+  if [[ "$direct_sync" == "true" ]]; then
+    for ((i = 1; i <= ${#direct_sources[@]}; i++)); do
+      src_path="${direct_sources[i]}"
+      dest_path="${direct_destinations[i]}"
+      ((current++))
+      progress_bar "$src_path" "$dest_path" "$current"
+      if [[ ! -d "$src_path" ]]; then
+        echo " [+] !! WARNING :: Direct source directory does not exist: $src_path"
+        continue
+      fi
+      rsync_command "direct" "$src_path" "$dest_path" "$direct_exlist"
+    done
+  fi
 }
 
 main
